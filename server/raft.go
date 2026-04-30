@@ -5,9 +5,10 @@ import (
 	"log"
 	"math/rand"
 	"os"
-	"raft/protobuf"
 	"sync"
 	"time"
+
+	"github.com/peterouob/Raft/protobuf"
 )
 
 type CMState int64

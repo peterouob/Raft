@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"raft/protobuf"
 	"sync"
 	"time"
 
+	"github.com/peterouob/Raft/protobuf"
 	"google.golang.org/grpc"
 )
 
