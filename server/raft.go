@@ -149,12 +149,13 @@ func (cm *ConsensusModule) startElection() {
 
 	for _, peerId := range cm.peerIds {
 		go func(id int64) {
-			args := RequestVoteArgs{
-				term:        savedCurrentTerm,
-				candidateId: id,
+
+			args := &protobuf.RequestVoteArgs{
+				Term:        savedCurrentTerm,
+				CandidateId: id,
 			}
 
-			cm.dlog("sending RequestVote to %d: %+v", peerId, args)
+			cm.dlog("sending RequestVote to %d: %+v", id, args)
 
 			if reply, err := cm.server.CallRequestVote(id, args); err != nil {
 				cm.mu.Lock()
@@ -168,11 +169,11 @@ func (cm *ConsensusModule) startElection() {
 				}
 
 				// reply.term > cm.currentTerm 相當於回覆期限比別人長就直接先變成 follower
-				if reply.term > cm.currentTerm {
+				if reply.Term > cm.currentTerm {
 					cm.dlog("term out of date in RequestVoteReply")
-					cm.becomeFollower(reply.term)
+					cm.becomeFollower(reply.Term)
 					return
-				} else if reply.term == cm.currentTerm {
+				} else if reply.Term == cm.currentTerm {
 					votesReceived += 1
 					// mini vote needs to be leader
 					if votesReceived > (len(cm.peerIds)/2)-1 {
@@ -188,79 +189,31 @@ func (cm *ConsensusModule) startElection() {
 	go cm.runElectionTimer()
 }
 
-// RequestVoteArgs For RV used only in the candidate state; candidates use it to request votes from peers in an election. The reply contains an indication of whether a vote is granted.
-type RequestVoteArgs struct {
-	// candidate's term
-	term int64
-
-	// candidate requesting a vote
-	candidateId int64
-
-	// index of candidate's last log entry
-	lastLogIndex int64
-
-	// term of candidate's last log entry
-	lastLogTerm int64
-}
-
-type RequestVoteArgsReply struct {
-	// currentTerm, for a candidate to update itself
-	term int64
-
-	// true means a candidate received a vote
-	voteGranted bool
-}
-
-func (cm *ConsensusModule) RequestVote(args *protobuf.RequestVoteArgs, reply *RequestVoteArgsReply) error {
+func (cm *ConsensusModule) RequestVote(args *protobuf.RequestVoteArgs, reply *protobuf.RequestVoteArgsResponse) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	req := RequestVoteArgs{
-		term:         args.Term,
-		candidateId:  args.CandidateId,
-		lastLogIndex: args.LastLogIndex,
-		lastLogTerm:  args.LastLogTerm,
-	}
-
 	if cm.state == Dead {
-		cm.dlog("in RequestVote, but state is Dead, bailing out")
 		return nil
 	}
 
-	if req.term > cm.currentTerm {
-		cm.dlog("term out of date in RequestVote")
-		cm.becomeFollower(req.term)
+	if args.Term > cm.currentTerm {
+		cm.becomeFollower(args.Term)
 	}
 
-	if cm.currentTerm == req.term && (cm.votedFor == -1 || cm.state == Candidate) {
-		reply.voteGranted = true
-		cm.votedFor = req.candidateId
+	if cm.currentTerm == args.Term && (cm.votedFor == -1 || cm.state == Candidate) {
+		reply.VoteGranted = true
+		cm.votedFor = args.CandidateId
 		cm.electionResetEvent = time.Now()
 	} else {
-		reply.voteGranted = false
+		reply.VoteGranted = false
 	}
 
-	reply.term = cm.currentTerm
-	cm.dlog("... RequestVote reply: %+v", reply)
-
+	reply.Term = cm.currentTerm
 	return nil
 }
 
-type AppendEntriesArgs struct {
-	term         int64
-	leaderId     int64
-	prevLogIndex int64
-	prevLogTerm  int64
-	entries      []*protobuf.LogEntry
-	leaderCommit int64
-}
-
-type AppendEntriesReply struct {
-	term    int64
-	success bool
-}
-
-func (cm *ConsensusModule) AppendEntries(req AppendEntriesArgs, reply *AppendEntriesReply) error {
+func (cm *ConsensusModule) AppendEntries(args *protobuf.AppendEntriesArgs, reply *protobuf.AppendEntriesReply) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
@@ -269,24 +222,24 @@ func (cm *ConsensusModule) AppendEntries(req AppendEntriesArgs, reply *AppendEnt
 		return nil
 	}
 
-	cm.dlog("AppendEntries: %+v", req)
+	cm.dlog("AppendEntries: %+v", args)
 
-	if req.term > cm.currentTerm {
+	if args.Term > cm.currentTerm {
 		cm.dlog("term out of date in AppendEntries")
-		cm.becomeFollower(req.term)
+		cm.becomeFollower(args.Term)
 	}
 
-	reply.success = false
-	if req.term == cm.currentTerm {
+	reply.Success = false
+	if args.Term == cm.currentTerm {
 		if cm.state != Follower {
-			cm.becomeFollower(req.term)
+			cm.becomeFollower(args.Term)
 		}
 		cm.electionResetEvent = time.Now()
-		reply.success = true
+		reply.Success = true
 	}
 
-	reply.term = cm.currentTerm
-	cm.dlog("AppendEntries reply: %+v", *reply)
+	reply.Term = cm.currentTerm
+	cm.dlog("AppendEntries reply: %+v", reply)
 
 	return nil
 }
@@ -331,9 +284,9 @@ func (cm *ConsensusModule) leaderSendHeartbeats() {
 
 	for _, peerId := range cm.peerIds {
 
-		args := AppendEntriesArgs{
-			term:     savedCurrentTerm,
-			leaderId: cm.id,
+		args := &protobuf.AppendEntriesArgs{
+			Term:     savedCurrentTerm,
+			LeaderId: cm.id,
 		}
 
 		go func(id int64) {
@@ -342,9 +295,9 @@ func (cm *ConsensusModule) leaderSendHeartbeats() {
 			if reply, err := cm.server.CallAppendEntries(id, args); err != nil {
 				cm.mu.Lock()
 				defer cm.mu.Unlock()
-				if reply.term > cm.currentTerm {
+				if reply.Term > cm.currentTerm {
 					cm.dlog("term out of date in AppendEntriesReply")
-					cm.becomeFollower(reply.term)
+					cm.becomeFollower(reply.Term)
 					return
 				}
 			}

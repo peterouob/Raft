@@ -17,8 +17,7 @@ type Server struct {
 	id    int64
 	peers []int64
 
-	cm       *ConsensusModule
-	rpcProxy *RPCProxy
+	cm *ConsensusModule
 
 	rpcServer *protobuf.RaftServiceServer
 	listener  net.Listener
@@ -42,11 +41,7 @@ func NewServer(serverId int64, peerIds []int64, ready <-chan any) *Server {
 	return s
 }
 
-type RPCProxy struct {
-	cm *ConsensusModule
-}
-
-func (s *Server) CallAppendEntries(peerId int64, args AppendEntriesArgs) (*AppendEntriesReply, error) {
+func (s *Server) CallAppendEntries(peerId int64, args *protobuf.AppendEntriesArgs) (*protobuf.AppendEntriesReply, error) {
 	s.mu.Lock()
 	peer := s.peerClients[peerId]
 	s.mu.Unlock()
@@ -55,32 +50,18 @@ func (s *Server) CallAppendEntries(peerId int64, args AppendEntriesArgs) (*Appen
 		return nil, fmt.Errorf("peer %d not found", peerId)
 	}
 
-	pbArgs := &protobuf.AppendEntriesArgs{
-		Term:         args.term,
-		LeaderId:     args.leaderId,
-		PrevLogIndex: args.prevLogIndex,
-		PrevLogTerm:  args.prevLogTerm,
-		Entries:      args.entries,
-		LeaderCommit: args.leaderCommit,
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	pbReply, err := peer.AppendEntries(ctx, pbArgs)
+	pbReply, err := peer.AppendEntries(ctx, args)
 	if err != nil {
 		return nil, err
 	}
 
-	reply := &AppendEntriesReply{
-		term:    pbReply.Term,
-		success: pbReply.Success,
-	}
-
-	return reply, nil
+	return pbReply, nil
 }
 
-func (s *Server) CallRequestVote(peerId int64, args RequestVoteArgs) (*RequestVoteArgsReply, error) {
+func (s *Server) CallRequestVote(peerId int64, args *protobuf.RequestVoteArgs) (*protobuf.RequestVoteArgsResponse, error) {
 	s.mu.Lock()
 	peer := s.peerClients[peerId]
 	s.mu.Unlock()
@@ -89,25 +70,13 @@ func (s *Server) CallRequestVote(peerId int64, args RequestVoteArgs) (*RequestVo
 		return nil, fmt.Errorf("peer %d not found", peerId)
 	}
 
-	pbArgs := &protobuf.RequestVoteArgs{
-		Term:         args.term,
-		CandidateId:  args.candidateId,
-		LastLogIndex: args.lastLogIndex,
-		LastLogTerm:  args.lastLogTerm,
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	pbReply, err := peer.RequestVote(ctx, pbArgs)
+	pbReply, err := peer.RequestVote(ctx, args)
 	if err != nil {
 		return nil, err
 	}
 
-	reply := &RequestVoteArgsReply{
-		term:        pbReply.Term,
-		voteGranted: pbReply.VoteGranted,
-	}
-
-	return reply, nil
+	return pbReply, nil
 }
