@@ -10,6 +10,7 @@ import (
 
 	"github.com/peterouob/Raft/protobuf"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type Server struct {
@@ -39,6 +40,7 @@ func NewServer(serverId int64, peerIds []int64, ready <-chan any) *Server {
 	s.id = serverId
 	s.peers = peerIds
 	s.peerClientConn = make(map[int64]*grpc.ClientConn)
+	s.peerClients = make(map[int64]protobuf.RaftServiceClient)
 	s.ready = ready
 	s.quit = make(chan any)
 	return s
@@ -84,6 +86,37 @@ func (s *Server) Serve(port int) {
 			s.gRpcServer.Stop()
 		}
 	})
+}
+
+func (s *Server) ConnectPeer(peerId int64, addr string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.peerClients[peerId]; ok {
+		return nil
+	}
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return err
+	}
+	s.peerClientConn[peerId] = conn
+	s.peerClients[peerId] = protobuf.NewRaftServiceClient(conn)
+	return nil
+}
+
+func (s *Server) DisconnectPeer(peerId int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if conn, ok := s.peerClientConn[peerId]; ok {
+		conn.Close()
+		delete(s.peerClientConn, peerId)
+		delete(s.peerClients, peerId)
+	}
+}
+
+func (s *Server) GetListenAddr() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.listener.Addr().String()
 }
 
 func (s *Server) CallAppendEntries(peerId int64, args *protobuf.AppendEntriesArgs) (*protobuf.AppendEntriesReply, error) {
