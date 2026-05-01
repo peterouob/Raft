@@ -107,6 +107,7 @@ func TestElectionLeaderDisconnectThenReconnect5(t *testing.T) {
 	sleepMs(150)
 	newLeaderId, newTerm := h.CheckSingleLeader()
 
+	// after reconnect leader change
 	h.ReconnectPeer(origLeaderId)
 	sleepMs(150)
 
@@ -115,7 +116,9 @@ func TestElectionLeaderDisconnectThenReconnect5(t *testing.T) {
 	if newLeaderId != againLeaderId {
 		t.Errorf("again leader id got %d; want %d", againLeaderId, newLeaderId)
 	}
+
 	if againTerm != newTerm {
+		// goroutine leak
 		t.Errorf("again term got %d; want %d", againTerm, newTerm)
 	}
 }

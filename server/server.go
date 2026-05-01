@@ -81,7 +81,6 @@ func (s *Server) Serve() {
 	protobuf.RegisterRaftServiceServer(s.gRpcServer, s)
 
 	s.wg.Go(func() {
-		defer s.wg.Done()
 		if err := s.gRpcServer.Serve(s.listener); err != nil {
 			s.gRpcServer.Stop()
 		}
@@ -119,11 +118,11 @@ func (s *Server) DIsconnectAllPeers() {
 	for _, conn := range s.peerClientConn {
 		conn.Close()
 	}
-	for peerId := range s.peerClientConn {
+	for peerId, _ := range s.peerClientConn {
 		delete(s.peerClientConn, peerId)
 	}
 
-	for peerId := range s.peerClients {
+	for peerId, _ := range s.peerClients {
 		delete(s.peerClients, peerId)
 	}
 }
@@ -132,7 +131,7 @@ func (s *Server) Shutdown() {
 	s.DIsconnectAllPeers()
 	s.gRpcServer.Stop()
 	close(s.quit)
-	s.wg.Wait()
+	close(s.cm.done)
 }
 
 func (s *Server) GetListenAddr() string {

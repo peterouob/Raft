@@ -5,6 +5,7 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 
@@ -55,6 +56,8 @@ type ConsensusModule struct {
 
 	state              CMState
 	electionResetEvent time.Time
+
+	done chan struct{}
 }
 
 func NewConsensusModule(id int64, peerIds []int64, server *Server, ready <-chan any) *ConsensusModule {
@@ -64,7 +67,7 @@ func NewConsensusModule(id int64, peerIds []int64, server *Server, ready <-chan 
 	cm.server = server
 	cm.state = Follower
 	cm.votedFor = -1
-
+	cm.done = make(chan struct{})
 	go func() {
 		<-ready
 		cm.mu.Lock()
@@ -111,7 +114,6 @@ func (cm *ConsensusModule) runElectionTimer() {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		<-ticker.C
 
 		cm.mu.Lock()
 		if cm.state != Candidate && cm.state != Follower {
@@ -132,7 +134,14 @@ func (cm *ConsensusModule) runElectionTimer() {
 			cm.mu.Unlock()
 			return
 		}
+
 		cm.mu.Unlock()
+
+		select {
+		case <-ticker.C:
+		case <-cm.done:
+			return
+		}
 	}
 }
 
@@ -261,13 +270,10 @@ func (cm *ConsensusModule) becomeFollower(term int64) {
 func (cm *ConsensusModule) startLeader() {
 	cm.state = Leader
 	cm.dlog("becomes Leader; term=%d, log=%v", cm.currentTerm, cm.log)
-
 	go func() {
 		ticker := time.NewTicker(50 * time.Millisecond)
 		defer ticker.Stop()
 		for {
-			cm.leaderSendHeartbeats()
-			<-ticker.C
 
 			cm.mu.Lock()
 			if cm.state != Leader {
@@ -276,6 +282,15 @@ func (cm *ConsensusModule) startLeader() {
 				return
 			}
 			cm.mu.Unlock()
+
+			cm.leaderSendHeartbeats()
+
+			select {
+			case <-ticker.C:
+				log.Println("goroutines alive:", runtime.NumGoroutine())
+			case <-cm.done:
+				return
+			}
 		}
 	}()
 }
@@ -298,12 +313,13 @@ func (cm *ConsensusModule) leaderSendHeartbeats() {
 
 			if reply, err := cm.server.CallAppendEntries(id, args); err == nil {
 				cm.mu.Lock()
-				defer cm.mu.Unlock()
 				if reply.Term > cm.currentTerm {
 					cm.dlog("term out of date in AppendEntriesReply")
 					cm.becomeFollower(reply.Term)
+					cm.mu.Unlock()
 					return
 				}
+				cm.mu.Unlock()
 			}
 		}(peerId)
 	}
