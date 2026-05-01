@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -19,8 +20,8 @@ type Server struct {
 
 	cm *ConsensusModule
 
-	rpcServer *protobuf.RaftServiceServer
-	listener  net.Listener
+	gRpcServer *grpc.Server
+	listener   net.Listener
 
 	//peerClientConn key is for the server id
 	peerClientConn map[int64]*grpc.ClientConn
@@ -29,6 +30,8 @@ type Server struct {
 	ready <-chan any
 	quit  chan any
 	wg    sync.WaitGroup
+
+	protobuf.UnimplementedRaftServiceServer
 }
 
 func NewServer(serverId int64, peerIds []int64, ready <-chan any) *Server {
@@ -39,6 +42,48 @@ func NewServer(serverId int64, peerIds []int64, ready <-chan any) *Server {
 	s.ready = ready
 	s.quit = make(chan any)
 	return s
+}
+
+func (s *Server) AppendEntries(_ context.Context, args *protobuf.AppendEntriesArgs) (*protobuf.AppendEntriesReply, error) {
+	var reply protobuf.AppendEntriesReply
+	if err := s.cm.AppendEntries(args, &reply); err != nil {
+		return nil, err
+	}
+	return &reply, nil
+
+}
+
+func (s *Server) RequestVote(_ context.Context, args *protobuf.RequestVoteArgs) (*protobuf.RequestVoteArgsResponse, error) {
+	var reply protobuf.RequestVoteArgsResponse
+	if err := s.cm.RequestVote(args, &reply); err != nil {
+		return nil, err
+	}
+	return &reply, nil
+}
+
+func (s *Server) Serve(port int) {
+	var err error
+
+	s.listener, err = net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		log.Fatalf("failed to listen: %v", err)
+	}
+
+	s.mu.Lock()
+	if s.cm == nil {
+		s.cm = NewConsensusModule(s.id, s.peers, s, s.ready)
+	}
+	s.mu.Unlock()
+
+	s.gRpcServer = grpc.NewServer()
+	protobuf.RegisterRaftServiceServer(s.gRpcServer, s)
+
+	s.wg.Go(func() {
+		defer s.wg.Done()
+		if err := s.gRpcServer.Serve(s.listener); err != nil {
+			s.gRpcServer.Stop()
+		}
+	})
 }
 
 func (s *Server) CallAppendEntries(peerId int64, args *protobuf.AppendEntriesArgs) (*protobuf.AppendEntriesReply, error) {
