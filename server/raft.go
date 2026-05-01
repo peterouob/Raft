@@ -70,6 +70,7 @@ func NewConsensusModule(id int64, peerIds []int64, server *Server, ready <-chan 
 		cm.mu.Lock()
 		cm.electionResetEvent = time.Now()
 		cm.mu.Unlock()
+		cm.runElectionTimer()
 	}()
 
 	return cm
@@ -126,6 +127,7 @@ func (cm *ConsensusModule) runElectionTimer() {
 		}
 
 		if elapsed := time.Since(cm.electionResetEvent); elapsed >= timeoutDuration {
+			cm.dlog("election timer elapsed (%v), starting new election", elapsed)
 			cm.startElection()
 			cm.mu.Unlock()
 			return
@@ -152,12 +154,12 @@ func (cm *ConsensusModule) startElection() {
 
 			args := &protobuf.RequestVoteArgs{
 				Term:        savedCurrentTerm,
-				CandidateId: id,
+				CandidateId: cm.id,
 			}
 
 			cm.dlog("sending RequestVote to %d: %+v", id, args)
 
-			if reply, err := cm.server.CallRequestVote(id, args); err != nil {
+			if reply, err := cm.server.CallRequestVote(id, args); err == nil {
 				cm.mu.Lock()
 				defer cm.mu.Unlock()
 				cm.dlog("Received the reply %v", reply)
@@ -174,12 +176,14 @@ func (cm *ConsensusModule) startElection() {
 					cm.becomeFollower(reply.Term)
 					return
 				} else if reply.Term == cm.currentTerm {
-					votesReceived += 1
-					// mini vote needs to be leader
-					if votesReceived > (len(cm.peerIds)/2)-1 {
-						cm.dlog("wins election with %d votes", votesReceived)
-						cm.startLeader()
-						return
+					if reply.VoteGranted {
+						votesReceived += 1
+						// mini vote needs to be leader
+						if votesReceived*2 > len(cm.peerIds)+1 {
+							cm.dlog("wins election with %d votes", votesReceived)
+							cm.startLeader()
+							return
+						}
 					}
 				}
 			}
@@ -201,7 +205,7 @@ func (cm *ConsensusModule) RequestVote(args *protobuf.RequestVoteArgs, reply *pr
 		cm.becomeFollower(args.Term)
 	}
 
-	if cm.currentTerm == args.Term && (cm.votedFor == -1 || cm.state == Candidate) {
+	if cm.currentTerm == args.Term && (cm.votedFor == -1 || cm.votedFor == args.CandidateId) {
 		reply.VoteGranted = true
 		cm.votedFor = args.CandidateId
 		cm.electionResetEvent = time.Now()
@@ -292,7 +296,7 @@ func (cm *ConsensusModule) leaderSendHeartbeats() {
 		go func(id int64) {
 			cm.dlog("sending AppendEntries to %v: ni=%d, args=%+v", peerId, 0, args)
 
-			if reply, err := cm.server.CallAppendEntries(id, args); err != nil {
+			if reply, err := cm.server.CallAppendEntries(id, args); err == nil {
 				cm.mu.Lock()
 				defer cm.mu.Unlock()
 				if reply.Term > cm.currentTerm {
