@@ -63,10 +63,10 @@ func (s *Server) RequestVote(_ context.Context, args *protobuf.RequestVoteArgs) 
 	return &reply, nil
 }
 
-func (s *Server) Serve(port int) {
+func (s *Server) Serve() {
 	var err error
 
-	s.listener, err = net.Listen("tcp", fmt.Sprintf(":%d", port))
+	s.listener, err = net.Listen("tcp", ":0")
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
@@ -111,6 +111,28 @@ func (s *Server) DisconnectPeer(peerId int64) {
 		delete(s.peerClientConn, peerId)
 		delete(s.peerClients, peerId)
 	}
+}
+
+func (s *Server) DIsconnectAllPeers() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, conn := range s.peerClientConn {
+		conn.Close()
+	}
+	for peerId := range s.peerClientConn {
+		delete(s.peerClientConn, peerId)
+	}
+
+	for peerId := range s.peerClients {
+		delete(s.peerClients, peerId)
+	}
+}
+
+func (s *Server) Shutdown() {
+	s.DIsconnectAllPeers()
+	s.gRpcServer.Stop()
+	close(s.quit)
+	s.wg.Wait()
 }
 
 func (s *Server) GetListenAddr() string {
