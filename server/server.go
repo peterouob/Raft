@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -93,7 +95,11 @@ func (s *Server) ConnectPeer(peerId int64, addr string) error {
 	if _, ok := s.peerClients[peerId]; ok {
 		return nil
 	}
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(
+		addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithUnaryInterceptor(UnreliableNetworkInterceptor()),
+	)
 	if err != nil {
 		return err
 	}
@@ -102,33 +108,56 @@ func (s *Server) ConnectPeer(peerId int64, addr string) error {
 	return nil
 }
 
+func UnreliableNetworkInterceptor() grpc.UnaryClientInterceptor {
+	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		if len(os.Getenv("RAFT_UNRELIABLE_RPC")) > 0 {
+			dice := rand.Intn(10)
+			if dice == 9 {
+				log.Printf("Interceptor: drop %s", method)
+				return fmt.Errorf("RPC failed (simulated drop)")
+			} else if dice == 8 {
+				log.Printf("Interceptor: delay %s", method)
+				time.Sleep(75 * time.Millisecond)
+			}
+		} else {
+			time.Sleep(time.Duration(1+rand.Intn(5)) * time.Millisecond)
+		}
+		return invoker(ctx, method, req, reply, cc, opts...)
+	}
+}
+
 func (s *Server) DisconnectPeer(peerId int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if conn, ok := s.peerClientConn[peerId]; ok {
-		conn.Close()
+		if err := conn.Close(); err != nil {
+			log.Printf("failed to close connection: %v", err)
+		}
 		delete(s.peerClientConn, peerId)
 		delete(s.peerClients, peerId)
 	}
 }
 
-func (s *Server) DIsconnectAllPeers() {
+func (s *Server) DisconnectAllPeers() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, conn := range s.peerClientConn {
-		conn.Close()
+		if err := conn.Close(); err != nil {
+			log.Printf("failed to close connection: %v", err)
+		}
 	}
-	for peerId, _ := range s.peerClientConn {
+
+	for peerId := range s.peerClientConn {
 		delete(s.peerClientConn, peerId)
 	}
 
-	for peerId, _ := range s.peerClients {
+	for peerId := range s.peerClients {
 		delete(s.peerClients, peerId)
 	}
 }
 
 func (s *Server) Shutdown() {
-	s.DIsconnectAllPeers()
+	s.DisconnectAllPeers()
 	s.gRpcServer.Stop()
 	close(s.quit)
 	close(s.cm.done)

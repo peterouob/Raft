@@ -71,7 +71,7 @@ func NewHarness(t *testing.T, n int64) *Harness {
 func (h *Harness) Shutdown() {
 	var i int64
 	for i = 0; i < h.n; i++ {
-		h.cluster[i].DIsconnectAllPeers()
+		h.cluster[i].DisconnectAllPeers()
 		h.connected[i] = false
 	}
 	for i = 0; i < h.n; i++ {
@@ -82,7 +82,7 @@ func (h *Harness) Shutdown() {
 // DisconnectPeer disconnects a server from all other servers in the cluster.
 func (h *Harness) DisconnectPeer(id int64) {
 	tlog("Disconnect %d", id)
-	h.cluster[id].DIsconnectAllPeers()
+	h.cluster[id].DisconnectAllPeers()
 	var j int64
 	for j = 0; j < h.n; j++ {
 		if j != id {
@@ -113,7 +113,7 @@ func (h *Harness) ReconnectPeer(id int64) {
 // Returns the leader's id and term. It retries several times if no leader is
 // identified yet.
 func (h *Harness) CheckSingleLeader() (int64, int64) {
-	for r := 0; r < 5; r++ {
+	for range 5 {
 		var leaderId int64 = -1
 		var leaderTerm int64 = -1
 		var i int64
