@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
@@ -222,9 +221,15 @@ func (cm *ConsensusModule) startElection() {
 	for _, peerId := range cm.peerIds {
 		go func(id int64) {
 
+			cm.mu.Lock()
+			savedIndex, savedTerm := cm.lastLogIndexAndTerm()
+			cm.mu.Unlock()
+
 			args := &protobuf.RequestVoteArgs{
-				Term:        savedCurrentTerm,
-				CandidateId: cm.id,
+				Term:         savedCurrentTerm,
+				CandidateId:  cm.id,
+				LastLogIndex: savedIndex,
+				LastLogTerm:  savedTerm,
 			}
 
 			cm.dlog("sending RequestVote to %d: %+v", id, args)
@@ -271,11 +276,15 @@ func (cm *ConsensusModule) RequestVote(args *protobuf.RequestVoteArgs, reply *pr
 		return nil
 	}
 
+	lastLogIndex, lastLogTerm := cm.lastLogIndexAndTerm()
+
 	if args.Term > cm.currentTerm {
 		cm.becomeFollower(args.Term)
 	}
 
-	if cm.currentTerm == args.Term && (cm.votedFor == -1 || cm.votedFor == args.CandidateId) {
+	if cm.currentTerm == args.Term &&
+		(cm.votedFor == -1 || cm.votedFor == args.CandidateId) &&
+		(args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex)) {
 		reply.VoteGranted = true
 		cm.votedFor = args.CandidateId
 		cm.electionResetEvent = time.Now()
@@ -344,7 +353,6 @@ func (cm *ConsensusModule) AppendEntries(args *protobuf.AppendEntriesArgs, reply
 			}
 		}
 
-		reply.Success = true
 	}
 
 	reply.Term = cm.currentTerm
@@ -439,7 +447,7 @@ func (cm *ConsensusModule) leaderSendHeartbeats() {
 						cm.dlog("AppendEntries reply from %d success: nextIndex := %v, matchIndex := %v", peerId, cm.nextIndex, cm.matchIndex)
 
 						savedCommitIndex := cm.commitIndex
-						for i := cm.commitIndex + 1; i <= int64(len(cm.log)); i++ {
+						for i := cm.commitIndex + 1; i < int64(len(cm.log)); i++ {
 							if cm.currentTerm == cm.log[i].Term {
 								matchCount := 1
 
@@ -470,28 +478,10 @@ func (cm *ConsensusModule) leaderSendHeartbeats() {
 	}
 }
 
-func logEntriesToProtobuf(entries []LogEntry) []*protobuf.LogEntry {
-	protoEntries := make([]*protobuf.LogEntry, 0, len(entries))
-	for i, _ := range entries {
-		command, err := json.Marshal(entries[i].Command)
-		if err != nil {
-			log.Fatal(err)
-		}
-		protoEntries = append(protoEntries, &protobuf.LogEntry{
-			Term:    entries[i].Term,
-			Command: command,
-		})
+func (cm *ConsensusModule) lastLogIndexAndTerm() (int64, int64) {
+	if len(cm.log) > 0 {
+		lastIndex := int64(len(cm.log) - 1)
+		return lastIndex, cm.log[lastIndex].Term
 	}
-	return protoEntries
-}
-
-func protobufToLogEntries(entries []*protobuf.LogEntry) []LogEntry {
-	logEntries := make([]LogEntry, 0, len(entries))
-	for i, _ := range entries {
-		logEntries = append(logEntries, LogEntry{
-			Term:    entries[i].Term,
-			Command: json.RawMessage(entries[i].Command),
-		})
-	}
-	return logEntries
+	return -1, -1
 }

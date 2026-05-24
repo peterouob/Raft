@@ -2,6 +2,7 @@ package server
 
 import (
 	"log"
+	"sync"
 	"testing"
 	"time"
 )
@@ -17,10 +18,13 @@ type Harness struct {
 	// connected has a bool per server in cluster, specifying whether this server
 	// is currently connected to peers (if false, it's partitioned and no messages
 	// will pass to or from it).
-	connected []bool
+	connected   []bool
+	commits     [][]CommitEntry
+	commitChans []chan CommitEntry
 
-	n int64
-	t *testing.T
+	n  int64
+	t  *testing.T
+	mu sync.Mutex
 }
 
 // NewHarness creates a new test Harness, initialized with n servers connected
@@ -148,6 +152,104 @@ func (h *Harness) CheckNoLeader() {
 			_, _, isLeader := h.cluster[i].cm.Report()
 			if isLeader {
 				h.t.Fatalf("server %d leader; want none", i)
+			}
+		}
+	}
+}
+
+func (h *Harness) SubmitToServer(serverId int64, cmd any) bool {
+	return h.cluster[serverId].cm.Submit(cmd)
+}
+
+// CheckCommitted verifies that all connected servers have cmd committed with
+// the same index. It also verifies that all commands *before* cmd in
+// the commit sequence match. For this to work properly, all commands submitted
+// to Raft should be unique positive ints.
+// Returns the number of servers that have this command committed, and its
+// log index.
+func (h *Harness) CheckCommitted(cmd int) (nc int, index int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// Find the length of the commits slice for connected servers.
+	commitsLen := -1
+	var i int64
+	for i = 0; i < h.n; i++ {
+		if h.connected[i] {
+			if commitsLen >= 0 {
+				// If this was set already, expect the new length to be the same.
+				if len(h.commits[i]) != commitsLen {
+					h.t.Fatalf("commits[%d] = %d, commitsLen = %d", i, h.commits[i], commitsLen)
+				}
+			} else {
+				commitsLen = len(h.commits[i])
+			}
+		}
+	}
+
+	// Check consistency of commits from the start and to the command we're asked
+	// about. This loop will return once a command=cmd is found.
+	for c := 0; c < commitsLen; c++ {
+		cmdAtC := -1
+		var i int64
+		for i = 0; i < h.n; i++ {
+			if h.connected[i] {
+				cmdOfN := h.commits[i][c].Command.(int)
+				if cmdAtC >= 0 {
+					if cmdOfN != cmdAtC {
+						h.t.Errorf("got %d, want %d at h.commits[%d][%d]", cmdOfN, cmdAtC, i, c)
+					}
+				} else {
+					cmdAtC = cmdOfN
+				}
+			}
+		}
+		if cmdAtC == cmd {
+			// Check consistency of Index.
+			var index int64 = -1
+			nc := 0
+			var i int64
+			for i = 0; i < h.n; i++ {
+				if h.connected[i] {
+					if index >= 0 && h.commits[i][c].Index != index {
+						h.t.Errorf("got Index=%d, want %d at h.commits[%d][%d]", h.commits[i][c].Index, index, i, c)
+					} else {
+						index = h.commits[i][c].Index
+					}
+					nc++
+				}
+			}
+			return nc, index
+		}
+	}
+
+	// If there's no early return, we haven't found the command we were looking
+	// for.
+	h.t.Errorf("cmd=%d not found in commits", cmd)
+	return -1, -1
+}
+
+func (h *Harness) CheckCommittedN(cmd int, n int) {
+	nc, _ := h.CheckCommitted(cmd)
+	if nc != n {
+		h.t.Errorf("CheckCommittedN got nc=%d, want %d", nc, n)
+	}
+}
+
+// CheckNotCommitted verifies that no command equal to cmd has been committed
+// by any of the active servers yet.
+func (h *Harness) CheckNotCommitted(cmd int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	var i int64
+	for i = 0; i < h.n; i++ {
+		if h.connected[i] {
+			for c := 0; c < len(h.commits[i]); c++ {
+				gotCmd := h.commits[i][c].Command.(int)
+				if gotCmd == cmd {
+					h.t.Errorf("found %d at commits[%d][%d], expected none", cmd, i, c)
+				}
 			}
 		}
 	}

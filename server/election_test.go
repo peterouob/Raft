@@ -169,3 +169,55 @@ func TestElectionDisconnectLoop(t *testing.T) {
 		sleepMs(150)
 	}
 }
+
+// TODO:FIX THE TEST
+func TestCommitsWithLeaderDisconnects(t *testing.T) {
+	defer leaktest.CheckTimeout(t, 100*time.Millisecond)()
+
+	h := NewHarness(t, 5)
+	defer h.Shutdown()
+
+	// Submit a couple of values to a fully connected cluster.
+	origLeaderId, _ := h.CheckSingleLeader()
+	h.SubmitToServer(origLeaderId, 5)
+	h.SubmitToServer(origLeaderId, 6)
+
+	sleepMs(150)
+	h.CheckCommittedN(6, 5)
+
+	// Leader disconnected...
+	h.DisconnectPeer(origLeaderId)
+	sleepMs(10)
+
+	// Submit 7 to original leader, even though it's disconnected.
+	h.SubmitToServer(origLeaderId, 7)
+
+	sleepMs(150)
+	h.CheckNotCommitted(7)
+
+	newLeaderId, _ := h.CheckSingleLeader()
+
+	// Submit 8 to new leader.
+	h.SubmitToServer(newLeaderId, 8)
+	sleepMs(150)
+	h.CheckCommittedN(8, 4)
+
+	// Reconnect old leader and let it settle. The old leader shouldn't be the one
+	// winning.
+	h.ReconnectPeer(origLeaderId)
+	sleepMs(600)
+
+	finalLeaderId, _ := h.CheckSingleLeader()
+	if finalLeaderId == origLeaderId {
+		t.Errorf("got finalLeaderId==origLeaderId==%d, want them different", finalLeaderId)
+	}
+
+	// Submit 9 and check it's fully committed.
+	h.SubmitToServer(newLeaderId, 9)
+	sleepMs(150)
+	h.CheckCommittedN(9, 5)
+	h.CheckCommittedN(8, 5)
+
+	// But 7 is not committed...
+	h.CheckNotCommitted(7)
+}
