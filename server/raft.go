@@ -70,11 +70,10 @@ type ConsensusModule struct {
 	electionResetEvent time.Time
 
 	// Volatile raft state on leader
-
-	// make sure goroutine will not leak
 	nextIndex  map[int64]int64
 	matchIndex map[int64]int64
 
+	// make sure goroutine will not leak
 	done chan struct{}
 }
 
@@ -86,6 +85,8 @@ func NewConsensusModule(id int64, peerIds []int64, server *Server, ready <-chan 
 	cm.state = Follower
 	cm.votedFor = -1
 	cm.done = make(chan struct{})
+	cm.nextIndex = make(map[int64]int64)
+	cm.matchIndex = make(map[int64]int64)
 	go func() {
 		<-ready
 		cm.mu.Lock()
