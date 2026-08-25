@@ -30,20 +30,22 @@ type Server struct {
 	peerClientConn map[int64]*grpc.ClientConn
 	peerClients    map[int64]protobuf.RaftServiceClient
 
-	ready <-chan any
-	quit  chan any
-	wg    sync.WaitGroup
+	ready      <-chan any
+	commitChan chan<- CommitEntry
+	quit       chan any
+	wg         sync.WaitGroup
 
 	protobuf.UnimplementedRaftServiceServer
 }
 
-func NewServer(serverId int64, peerIds []int64, ready <-chan any) *Server {
+func NewServer(serverId int64, peerIds []int64, ready <-chan any, commitChan chan<- CommitEntry) *Server {
 	s := new(Server)
 	s.id = serverId
 	s.peers = peerIds
 	s.peerClientConn = make(map[int64]*grpc.ClientConn)
 	s.peerClients = make(map[int64]protobuf.RaftServiceClient)
 	s.ready = ready
+	s.commitChan = commitChan
 	s.quit = make(chan any)
 	return s
 }
@@ -75,7 +77,7 @@ func (s *Server) Serve() {
 
 	s.mu.Lock()
 	if s.cm == nil {
-		s.cm = NewConsensusModule(s.id, s.peers, s, s.ready)
+		s.cm = NewConsensusModule(s.id, s.peers, s, s.ready, s.commitChan)
 	}
 	s.mu.Unlock()
 

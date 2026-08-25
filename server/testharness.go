@@ -1,3 +1,7 @@
+// Test harness for writing tests for Raft.
+//
+// Eli Bendersky [https://eli.thegreenplace.net]
+// This code is in the public domain.
 package server
 
 import (
@@ -12,19 +16,27 @@ func init() {
 }
 
 type Harness struct {
+	mu sync.Mutex
+
 	// cluster is a list of all the raft servers participating in a cluster.
 	cluster []*Server
+
+	// commitChans has a channel per server in cluster with the commit channel for
+	// that server.
+	commitChans []chan CommitEntry
+
+	// commits at index i holds the sequence of commits made by server i so far.
+	// It is populated by goroutines that listen on the corresponding commitChans
+	// channel.
+	commits [][]CommitEntry
 
 	// connected has a bool per server in cluster, specifying whether this server
 	// is currently connected to peers (if false, it's partitioned and no messages
 	// will pass to or from it).
-	connected   []bool
-	commits     [][]CommitEntry
-	commitChans []chan CommitEntry
+	connected []bool
 
-	n  int64
-	t  *testing.T
-	mu sync.Mutex
+	n int64
+	t *testing.T
 }
 
 // NewHarness creates a new test Harness, initialized with n servers connected
@@ -32,42 +44,50 @@ type Harness struct {
 func NewHarness(t *testing.T, n int64) *Harness {
 	ns := make([]*Server, n)
 	connected := make([]bool, n)
+	commitChans := make([]chan CommitEntry, n)
+	commits := make([][]CommitEntry, n)
 	ready := make(chan any)
 
-	var i int64
-	var j int64
-	var p int64
 	// Create all Servers in this cluster, assign ids and peer ids.
+	var i int64
 	for i = 0; i < n; i++ {
 		peerIds := make([]int64, 0)
+		var p int64
 		for p = 0; p < n; p++ {
 			if p != i {
 				peerIds = append(peerIds, p)
 			}
 		}
 
-		ns[i] = NewServer(i, peerIds, ready)
+		commitChans[i] = make(chan CommitEntry)
+		ns[i] = NewServer(int64(i), peerIds, ready, commitChans[i])
 		ns[i].Serve()
 	}
 
 	// Connect all peers to each other.
-
+	var j int64
 	for i = 0; i < n; i++ {
 		for j = 0; j < n; j++ {
 			if i != j {
-				ns[i].ConnectPeer(j, ns[j].GetListenAddr())
+				ns[i].ConnectPeer(int64(j), ns[j].GetListenAddr())
 			}
 		}
 		connected[i] = true
 	}
 	close(ready)
 
-	return &Harness{
-		cluster:   ns,
-		connected: connected,
-		n:         n,
-		t:         t,
+	h := &Harness{
+		cluster:     ns,
+		commitChans: commitChans,
+		commits:     commits,
+		connected:   connected,
+		n:           n,
+		t:           t,
 	}
+	for i = 0; i < n; i++ {
+		go h.collectCommits(i)
+	}
+	return h
 }
 
 // Shutdown shuts down all the servers in the harness and waits for them to
@@ -81,6 +101,9 @@ func (h *Harness) Shutdown() {
 	for i = 0; i < h.n; i++ {
 		h.cluster[i].Shutdown()
 	}
+	for i = 0; i < h.n; i++ {
+		close(h.commitChans[i])
+	}
 }
 
 // DisconnectPeer disconnects a server from all other servers in the cluster.
@@ -90,7 +113,7 @@ func (h *Harness) DisconnectPeer(id int64) {
 	var j int64
 	for j = 0; j < h.n; j++ {
 		if j != id {
-			h.cluster[j].DisconnectPeer(id)
+			h.cluster[j].DisconnectPeer(int64(id))
 		}
 	}
 	h.connected[id] = false
@@ -102,10 +125,10 @@ func (h *Harness) ReconnectPeer(id int64) {
 	var j int64
 	for j = 0; j < h.n; j++ {
 		if j != id {
-			if err := h.cluster[id].ConnectPeer(j, h.cluster[j].GetListenAddr()); err != nil {
+			if err := h.cluster[id].ConnectPeer(int64(j), h.cluster[j].GetListenAddr()); err != nil {
 				h.t.Fatal(err)
 			}
-			if err := h.cluster[j].ConnectPeer(id, h.cluster[id].GetListenAddr()); err != nil {
+			if err := h.cluster[j].ConnectPeer(int64(id), h.cluster[id].GetListenAddr()); err != nil {
 				h.t.Fatal(err)
 			}
 		}
@@ -116,10 +139,10 @@ func (h *Harness) ReconnectPeer(id int64) {
 // CheckSingleLeader checks that only a single server thinks it's the leader.
 // Returns the leader's id and term. It retries several times if no leader is
 // identified yet.
-func (h *Harness) CheckSingleLeader() (int64, int64) {
-	for range 5 {
+func (h *Harness) CheckSingleLeader() (int64, int) {
+	for r := 0; r < 8; r++ {
 		var leaderId int64 = -1
-		var leaderTerm int64 = -1
+		leaderTerm := -1
 		var i int64
 		for i = 0; i < h.n; i++ {
 			if h.connected[i] {
@@ -127,7 +150,7 @@ func (h *Harness) CheckSingleLeader() (int64, int64) {
 				if isLeader {
 					if leaderId < 0 {
 						leaderId = i
-						leaderTerm = term
+						leaderTerm = int(term)
 					} else {
 						h.t.Fatalf("both %d and %d think they're leaders", leaderId, i)
 					}
@@ -155,10 +178,6 @@ func (h *Harness) CheckNoLeader() {
 			}
 		}
 	}
-}
-
-func (h *Harness) SubmitToServer(serverId int64, cmd any) bool {
-	return h.cluster[serverId].cm.Submit(cmd)
 }
 
 // CheckCommitted verifies that all connected servers have cmd committed with
@@ -229,6 +248,8 @@ func (h *Harness) CheckCommitted(cmd int) (nc int, index int64) {
 	return -1, -1
 }
 
+// CheckCommittedN verifies that cmd was committed by exactly n connected
+// servers.
 func (h *Harness) CheckCommittedN(cmd int, n int) {
 	nc, _ := h.CheckCommitted(cmd)
 	if nc != n {
@@ -255,6 +276,11 @@ func (h *Harness) CheckNotCommitted(cmd int) {
 	}
 }
 
+// SubmitToServer submits the command to serverId.
+func (h *Harness) SubmitToServer(serverId int64, cmd any) bool {
+	return h.cluster[serverId].cm.Submit(cmd)
+}
+
 func tlog(format string, a ...any) {
 	format = "[TEST] " + format
 	log.Printf(format, a...)
@@ -262,4 +288,16 @@ func tlog(format string, a ...any) {
 
 func sleepMs(n int) {
 	time.Sleep(time.Duration(n) * time.Millisecond)
+}
+
+// collectCommits reads channel commitChans[i] and adds all received entries
+// to the corresponding commits[i]. It's blocking and should be run in a
+// separate goroutine. It returns when commitChans[i] is closed.
+func (h *Harness) collectCommits(i int64) {
+	for c := range h.commitChans[i] {
+		h.mu.Lock()
+		tlog("collectCommits(%d) got %+v", i, c)
+		h.commits[i] = append(h.commits[i], c)
+		h.mu.Unlock()
+	}
 }

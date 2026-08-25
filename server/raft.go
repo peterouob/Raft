@@ -5,7 +5,6 @@ import (
 	"log"
 	"math/rand"
 	"os"
-	"runtime"
 	"sync"
 	"time"
 
@@ -61,7 +60,7 @@ type ConsensusModule struct {
 	log         []LogEntry
 
 	newCommitReadyChan chan struct{}
-	commitChan         chan CommitEntry
+	commitChan         chan<- CommitEntry
 
 	// Volatile raft state on all servers
 	commitIndex        int64
@@ -77,7 +76,7 @@ type ConsensusModule struct {
 	done chan struct{}
 }
 
-func NewConsensusModule(id int64, peerIds []int64, server *Server, ready <-chan any) *ConsensusModule {
+func NewConsensusModule(id int64, peerIds []int64, server *Server, ready <-chan any, commitChan chan<- CommitEntry) *ConsensusModule {
 	cm := new(ConsensusModule)
 	cm.id = id
 	cm.peerIds = peerIds
@@ -87,6 +86,12 @@ func NewConsensusModule(id int64, peerIds []int64, server *Server, ready <-chan 
 	cm.done = make(chan struct{})
 	cm.nextIndex = make(map[int64]int64)
 	cm.matchIndex = make(map[int64]int64)
+	cm.newCommitReadyChan = make(chan struct{}, 16)
+	cm.commitChan = commitChan
+
+	cm.commitIndex = -1
+	cm.lastApplied = -1
+
 	go func() {
 		<-ready
 		cm.mu.Lock()
@@ -95,6 +100,7 @@ func NewConsensusModule(id int64, peerIds []int64, server *Server, ready <-chan 
 		cm.runElectionTimer()
 	}()
 
+	go cm.commitChanSender()
 	return cm
 }
 
@@ -125,8 +131,6 @@ func (cm *ConsensusModule) electionTimeout() time.Duration {
 
 func (cm *ConsensusModule) Submit(command any) bool {
 	cm.mu.Lock()
-	defer cm.mu.Unlock()
-
 	cm.dlog("Submit received by %v: %v", cm.state, command)
 
 	if cm.state == Leader {
@@ -135,33 +139,42 @@ func (cm *ConsensusModule) Submit(command any) bool {
 			Term:    cm.currentTerm,
 		})
 		cm.dlog("appended command to log, log=%v", cm.log)
+		cm.mu.Unlock()
+		cm.leaderSendHeartbeats()
 		return true
 	}
+
+	cm.mu.Unlock()
 	return false
 }
 
 func (cm *ConsensusModule) commitChanSender() {
-	for range cm.newCommitReadyChan {
-		cm.mu.Lock()
-		savedTerm := cm.currentTerm
-		savedApplyIndex := cm.lastApplied
-		var entries []LogEntry
-		if cm.commitIndex > savedApplyIndex {
-			entries = cm.log[savedApplyIndex+1 : cm.commitIndex+1]
-			cm.lastApplied = cm.commitIndex
-		}
-		cm.mu.Unlock()
-		cm.dlog("commitChanSender entries=%v, savedLastApplied=%d", entries, savedApplyIndex)
-
-		for i, entry := range entries {
-			cm.commitChan <- CommitEntry{
-				Command: entry.Command,
-				Index:   savedApplyIndex + int64(i) + 1,
-				Term:    savedTerm,
+	for {
+		select {
+		case <-cm.newCommitReadyChan:
+			cm.mu.Lock()
+			savedTerm := cm.currentTerm
+			savedApplyIndex := cm.lastApplied
+			var entries []LogEntry
+			if cm.commitIndex > savedApplyIndex {
+				entries = cm.log[savedApplyIndex+1 : cm.commitIndex+1]
+				cm.lastApplied = cm.commitIndex
 			}
+			cm.mu.Unlock()
+			cm.dlog("commitChanSender entries=%v, savedLastApplied=%d", entries, savedApplyIndex)
+
+			for i, entry := range entries {
+				cm.commitChan <- CommitEntry{
+					Command: entry.Command,
+					Index:   savedApplyIndex + int64(i) + 1,
+					Term:    savedTerm,
+				}
+			}
+		case <-cm.done:
+			cm.dlog("commitChanSender done")
+			return
 		}
 	}
-	cm.dlog("commitChanSender done")
 }
 
 func (cm *ConsensusModule) runElectionTimer() {
@@ -291,6 +304,7 @@ func (cm *ConsensusModule) RequestVote(args *protobuf.RequestVoteArgs, reply *pr
 		cm.electionResetEvent = time.Now()
 	} else {
 		reply.VoteGranted = false
+		cm.dlog("RequestVote reject: args=%+v, myLastIdx=%d myLastTerm=%d", args, lastLogIndex, lastLogTerm)
 	}
 
 	reply.Term = cm.currentTerm
@@ -328,11 +342,8 @@ func (cm *ConsensusModule) AppendEntries(args *protobuf.AppendEntriesArgs, reply
 			newEntriesIndex := 0
 
 			for {
-				if logInsertIndex >= int64(len(cm.log)) || newEntriesIndex >= len(args.Entries) {
-					break
-				}
-
-				if args.Entries[newEntriesIndex].Term != cm.log[logInsertIndex].Term {
+				if (logInsertIndex >= int64(len(cm.log)) || newEntriesIndex >= len(args.Entries)) ||
+					(args.Entries[newEntriesIndex].Term != cm.log[logInsertIndex].Term) {
 					break
 				}
 
@@ -349,8 +360,8 @@ func (cm *ConsensusModule) AppendEntries(args *protobuf.AppendEntriesArgs, reply
 
 			if args.LeaderCommit > cm.commitIndex {
 				cm.commitIndex = min(args.LeaderCommit, int64(len(cm.log)-1))
-				cm.dlog("... setting commitIndex=%d", cm.commitIndex)
 				cm.newCommitReadyChan <- struct{}{}
+				cm.dlog("... setting commitIndex=%d", cm.commitIndex)
 			}
 		}
 
@@ -374,9 +385,15 @@ func (cm *ConsensusModule) becomeFollower(term int64) {
 
 func (cm *ConsensusModule) startLeader() {
 	cm.state = Leader
+
+	for _, peerId := range cm.peerIds {
+		cm.nextIndex[peerId] = int64(len(cm.log))
+		cm.matchIndex[peerId] = -1
+	}
+
 	cm.dlog("becomes Leader; term=%d, log=%v", cm.currentTerm, cm.log)
 	go func() {
-		ticker := time.NewTicker(50 * time.Millisecond)
+		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {
 
@@ -392,7 +409,6 @@ func (cm *ConsensusModule) startLeader() {
 
 			select {
 			case <-ticker.C:
-				log.Println("goroutines alive:", runtime.NumGoroutine())
 			case <-cm.done:
 				return
 			}
@@ -458,7 +474,7 @@ func (cm *ConsensusModule) leaderSendHeartbeats() {
 									}
 								}
 
-								if matchCount*2 > len(cm.peerIds)+1 {
+								if matchCount >= (len(cm.peerIds))/2+1 {
 									cm.commitIndex = i
 									cm.dlog("commitIndex updated to %d", cm.commitIndex)
 								}
