@@ -104,11 +104,11 @@ func TestElectionLeaderDisconnectThenReconnect5(t *testing.T) {
 	origLeaderId, _ := h.CheckSingleLeader()
 
 	h.DisconnectPeer(origLeaderId)
-	sleepMs(150)
+	sleepMs(1500)
 	newLeaderId, newTerm := h.CheckSingleLeader()
 
 	h.ReconnectPeer(origLeaderId)
-	sleepMs(150)
+	sleepMs(1500)
 
 	againLeaderId, againTerm := h.CheckSingleLeader()
 
@@ -181,7 +181,7 @@ func TestCommitOneCommand(t *testing.T) {
 		t.Errorf("want id=%d leader, but it's not", origLeaderId)
 	}
 
-	sleepMs(1500)
+	sleepMs(150)
 	h.CheckCommittedN(42, 3)
 }
 

@@ -341,12 +341,9 @@ func (cm *ConsensusModule) AppendEntries(args *protobuf.AppendEntriesArgs, reply
 			logInsertIndex := args.PrevLogIndex + 1
 			newEntriesIndex := 0
 
-			for {
-				if (logInsertIndex >= int64(len(cm.log)) || newEntriesIndex >= len(args.Entries)) ||
-					(args.Entries[newEntriesIndex].Term != cm.log[logInsertIndex].Term) {
-					break
-				}
-
+			for logInsertIndex < int64(len(cm.log)) &&
+				newEntriesIndex < len(args.Entries) &&
+				args.Entries[newEntriesIndex].Term == cm.log[logInsertIndex].Term {
 				logInsertIndex++
 				newEntriesIndex++
 			}
@@ -393,7 +390,7 @@ func (cm *ConsensusModule) startLeader() {
 
 	cm.dlog("becomes Leader; term=%d, log=%v", cm.currentTerm, cm.log)
 	go func() {
-		ticker := time.NewTicker(5 * time.Second)
+		ticker := time.NewTicker(150 * time.Millisecond)
 		defer ticker.Stop()
 		for {
 

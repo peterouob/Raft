@@ -114,12 +114,13 @@ func UnreliableNetworkInterceptor() grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 		if len(os.Getenv("RAFT_UNRELIABLE_RPC")) > 0 {
 			dice := rand.Intn(10)
-			if dice == 9 {
+			switch dice {
+			case 9:
 				log.Printf("Interceptor: drop %s", method)
 				return fmt.Errorf("RPC failed (simulated drop)")
-			} else if dice == 8 {
-				log.Printf("Interceptor: delay %s", method)
-				time.Sleep(75 * time.Millisecond)
+			case 8:
+				log.Printf("Interceptor: drop %s", method)
+				return fmt.Errorf("RPC failed (simulated drop)")
 			}
 		} else {
 			time.Sleep(time.Duration(1+rand.Intn(5)) * time.Millisecond)
