@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"log"
 
@@ -25,9 +26,20 @@ func logEntriesToProtobuf(entries []LogEntry) []*protobuf.LogEntry {
 func protobufToLogEntries(entries []*protobuf.LogEntry) []LogEntry {
 	logEntries := make([]LogEntry, 0, len(entries))
 	for i := range entries {
+		var cmd any
+		dec := json.NewDecoder(bytes.NewReader(entries[i].Command))
+		dec.UseNumber()
+		if err := dec.Decode(&cmd); err != nil {
+			log.Fatal(err)
+		}
+		if n, ok := cmd.(json.Number); ok {
+			if iv, err := n.Int64(); err == nil {
+				cmd = int(iv)
+			}
+		}
 		logEntries = append(logEntries, LogEntry{
 			Term:    entries[i].Term,
-			Command: json.RawMessage(entries[i].Command),
+			Command: cmd,
 		})
 	}
 	return logEntries

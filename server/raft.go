@@ -457,6 +457,8 @@ func (cm *ConsensusModule) leaderSendHeartbeats() {
 					return
 				}
 
+				flag := false
+
 				if cm.state == Leader && reply.Term == savedCurrentTerm {
 					if reply.Success {
 						cm.nextIndex[peerId] = nextIdx + int64(len(entries))
@@ -474,7 +476,7 @@ func (cm *ConsensusModule) leaderSendHeartbeats() {
 									}
 								}
 
-								if matchCount >= (len(cm.peerIds))/2+1 {
+								if matchCount*2 > len(cm.peerIds)+1 {
 									cm.commitIndex = i
 									cm.dlog("commitIndex updated to %d", cm.commitIndex)
 								}
@@ -482,12 +484,19 @@ func (cm *ConsensusModule) leaderSendHeartbeats() {
 						}
 
 						if cm.commitIndex != savedCommitIndex {
+							flag = true
 							cm.dlog("leader sets commitIndex := %d", cm.commitIndex)
-							cm.newCommitReadyChan <- struct{}{}
 						}
 					} else {
 						cm.nextIndex[peerId] = nextIdx - 1
 						cm.dlog("AppendEntries reply from %d !success: nextIndex := %d", peerId, nextIdx-1)
+					}
+
+					if flag {
+						select {
+						case cm.newCommitReadyChan <- struct{}{}:
+						case <-cm.done:
+						}
 					}
 				}
 			}

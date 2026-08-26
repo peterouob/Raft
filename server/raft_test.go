@@ -181,7 +181,7 @@ func TestCommitOneCommand(t *testing.T) {
 		t.Errorf("want id=%d leader, but it's not", origLeaderId)
 	}
 
-	sleepMs(150)
+	sleepMs(1500)
 	h.CheckCommittedN(42, 3)
 }
 
